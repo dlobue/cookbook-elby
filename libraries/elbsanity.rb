@@ -24,7 +24,7 @@ def get_live_elb_mapping(elbconn)
         lbname = elb['LoadBalancerName']
         lb_instances = elb['Instances']
         Chef::Log.debug("Found the following instances in the #{lbname} load balancer: #{lb_instances.join(', ')}")
-        basket[lbname] = lb_instances
+        basket[lbname] = lb_instances # more direct mapping of load balancer name to currently registered instances
         zone_map[lbname] = elb['AvailabilityZones']
     end
     return basket, zone_map
@@ -127,16 +127,16 @@ def update_elb_instances(node, elbconn)
             end
         end
 
-        if not to_deregister.empty?
-            to_dereg_str = (to_deregister.map {|i| "#{identity_map[i]} (i)" }).join(', ')
-            Chef::Log.info("Deregistering the following instances from the ELB #{elb_name}: #{to_dereg_str}")
-            elbconn.deregister_instances(to_deregister, elb_name)
-            updated = true
-        end
         if not to_register.empty?
             to_reg_str = (to_register.map {|i| "#{identity_map[i]} (i)" }).join(', ')
             Chef::Log.info("Registering the following instances to the ELB #{elb_name}: #{to_reg_str}")
             elbconn.register_instances(to_register, elb_name)
+            updated = true
+        end
+        if not to_deregister.empty?
+            to_dereg_str = (to_deregister.map {|i| "#{identity_map[i]} (i)" }).join(', ')
+            Chef::Log.info("Deregistering the following instances from the ELB #{elb_name}: #{to_dereg_str}")
+            elbconn.deregister_instances(to_deregister, elb_name)
             updated = true
         end
     end
