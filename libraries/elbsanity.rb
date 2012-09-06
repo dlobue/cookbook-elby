@@ -134,6 +134,18 @@ def update_elb_instances(node, elbconn)
             updated = true
         end
         if not to_deregister.empty?
+
+            # wait until all new instances are in service so we don't take down the site on accident
+            elb = elbconn.load_balancers.get(elb_name)
+            while not elb.instances_out_of_service.select {|i| not to_deregister.include? i }.empty?
+                Chef::Log.info("Waiting for all servers to go in service before deregistering old servers")
+                sleep 1
+                elb.reload
+            end if node.elby.wait_for_healthy
+            # TODO: instead of making sure all instances are healthy before progressing, make sure a majority are passing
+
+
+
             to_dereg_str = (to_deregister.map {|i| "#{identity_map[i]} (i)" }).join(', ')
             Chef::Log.info("Deregistering the following instances from the ELB #{elb_name}: #{to_dereg_str}")
             elbconn.deregister_instances(to_deregister, elb_name)
