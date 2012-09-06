@@ -34,10 +34,7 @@ def get_elbconn(node)
     if not FOGFOUND
         raise RequirementError, "Aborting: The fog library is missing!"
     end
-    creds = get_creds()
-    elbconn = Fog::AWS::ELB.new(:region => node[:ec2][:region],
-                                :aws_access_key_id => creds["s3_access_key"],
-                                :aws_secret_access_key => creds["s3_secret_key"])
+    elbconn = Fog::AWS::ELB.new({:region => node[:ec2][:region]}.upgrade get_creds)
     return elbconn
 end
 
@@ -46,10 +43,8 @@ def update_elb_zones(elbconn, node)
         raise RequirementError, "Aborting: The fog library is missing!"
     end
     creds = get_creds()
-    ec2 = Fog::Compute.new(:provider => 'AWS',
-                           :region => node[:ec2][:region],
-                           :aws_access_key_id => creds["s3_access_key"],
-                           :aws_secret_access_key => creds["s3_secret_key"])
+    ec2 = Fog::Compute.new({:provider => 'AWS',
+                           :region => node[:ec2][:region]}.update get_creds)
 
     _memoized = {}
 
