@@ -53,47 +53,51 @@ def update_elb_zones(elbconn, node)
 
     _memoized = {}
 
+    threads = []
     live_mapping, zone_map = get_live_elb_mapping(elbconn)
     live_mapping.each_pair do |elb_name,instances|
         if instances.empty?
             Chef::Log.debug("The elb #{elb_name} has no instances registered to it. going to the next elb.")
             next
         end
-        req_zones = Set.new(instances) { |i|
-            begin
-                _memoized.has_key?(i) ? _memoized[i] : _memoized[i] = ec2.servers.get(i).availability_zone
-            rescue NoMethodError => e
-                Chef::Application.fatal!("Instance that no longer exists is still in ELB! #{i}")
+        threads << Thread.new do
+            req_zones = Set.new(instances) { |i|
+                begin
+                    _memoized.has_key?(i) ? _memoized[i] : _memoized[i] = ec2.servers.get(i).availability_zone
+                rescue NoMethodError => e
+                    Chef::Application.fatal!("Instance that no longer exists is still in ELB! #{i}")
+                end
+            }
+            Chef::Log.debug("The instances of the #{elb_name} elb are in the following zones: #{req_zones.to_a.join(', ')}")
+            cur_zones = Set.new(zone_map[elb_name])
+            Chef::Log.debug("The #{elb_name} elb is configured for the following zones: #{cur_zones.to_a.join(', ')}")
+
+            to_enable = req_zones.difference(cur_zones).to_a
+            to_disable = cur_zones.difference(req_zones).to_a
+
+            if not to_enable.empty?
+                Chef::Log.info("Enabling the following zones on the #{elb_name} elb: #{to_enable.join(', ')}")
+                elbconn.enable_zones(to_enable, elb_name)
             end
-        }
-        Chef::Log.debug("The instances of the #{elb_name} elb are in the following zones: #{req_zones.to_a.join(', ')}")
-        cur_zones = Set.new(zone_map[elb_name])
-        Chef::Log.debug("The #{elb_name} elb is configured for the following zones: #{cur_zones.to_a.join(', ')}")
-
-        to_enable = req_zones.difference(cur_zones).to_a
-        to_disable = cur_zones.difference(req_zones).to_a
-
-        if not to_enable.empty?
-            Chef::Log.info("Enabling the following zones on the #{elb_name} elb: #{to_enable.join(', ')}")
-            elbconn.enable_zones(to_enable, elb_name)
-        end
-        if not to_disable.empty?
-            Chef::Log.info("Disabling the following zones on the #{elb_name} elb: #{to_disable.join(', ')}")
-            elbconn.disable_zones(to_disable, elb_name)
+            if not to_disable.empty?
+                Chef::Log.info("Disabling the following zones on the #{elb_name} elb: #{to_disable.join(', ')}")
+                elbconn.disable_zones(to_disable, elb_name)
+            end
         end
     end
+    threads.each { |t| t.join }
 end
 
 def update_elb_instances(node, elbconn)
     if not FOGFOUND
         raise RequirementError, "Aborting: The fog library is missing!"
     end
-    updated = false
     live_mapping = get_live_elb_mapping(elbconn)
     already_configured = []
     care_about = []
     proper_mapping = {}
     identity_map = {}
+    threads = []
     node[:deployment][:elbs].each_pair do |trait,elb_name|
         nodes = fakesearch_nodes(trait.to_s)
         proper_mapping[elb_name] = nodes unless elb_name.nil?
@@ -102,57 +106,57 @@ def update_elb_instances(node, elbconn)
     end
 
     live_mapping[0].each_pair do |elb_name,instances|
-        to_deregister = []
-        to_register = []
-        instances.each do |instance|
-            if care_about.include? instance #instance is in our deployment
-                if ( proper_mapping[elb_name].nil? or
-                    (proper_mapping[elb_name].select { |n|
-                        n[:persist][:ec2_instance_id] == instance }).empty? )
-                    Chef::Log.info("Node #{identity_map[instance]} (#{instance}) is in the wrong ELB, or shouldn't be in an elb - queueing node to be deregistered.")
-                    to_deregister << instance
-                else
-                    already_configured.push(instance)
+        threads << Thread.new do
+            to_deregister = []
+            to_register = []
+            instances.each do |instance|
+                if care_about.include? instance #instance is in our deployment
+                    if ( proper_mapping[elb_name].nil? or
+                        (proper_mapping[elb_name].select { |n|
+                            n[:persist][:ec2_instance_id] == instance }).empty? )
+                        Chef::Log.info("Node #{identity_map[instance]} (#{instance}) is in the wrong ELB, or shouldn't be in an elb - queueing node to be deregistered.")
+                        to_deregister << instance
+                    else
+                        already_configured.push(instance)
+                    end
                 end
             end
-        end
 
-        if not proper_mapping[elb_name].nil?
-            proper_mapping[elb_name].each do |n|
-                if (( not already_configured.include? n[:persist][:ec2_instance_id] ) and
-                    n[:persist][:state] == 'available' )
-                    Chef::Log.info("Node #{n[:persist][:fqdn]} (#{n[:persist][:ec2_instance_id]}) is missing from the ELB and is ready - queueing node to be registered.")
-                    to_register << n[:persist][:ec2_instance_id]
+            if not proper_mapping[elb_name].nil?
+                proper_mapping[elb_name].each do |n|
+                    if (( not already_configured.include? n[:persist][:ec2_instance_id] ) and
+                        n[:persist][:state] == 'available' )
+                        Chef::Log.info("Node #{n[:persist][:fqdn]} (#{n[:persist][:ec2_instance_id]}) is missing from the ELB and is ready - queueing node to be registered.")
+                        to_register << n[:persist][:ec2_instance_id]
+                    end
                 end
             end
-        end
 
-        if not to_register.empty?
-            to_reg_str = (to_register.map {|i| "#{identity_map[i]} (i)" }).join(', ')
-            Chef::Log.info("Registering the following instances to the ELB #{elb_name}: #{to_reg_str}")
-            elbconn.register_instances(to_register, elb_name)
-            updated = true
-        end
-        if not to_deregister.empty?
+            if not to_register.empty?
+                to_reg_str = (to_register.map {|i| "#{identity_map[i]} (i)" }).join(', ')
+                Chef::Log.info("Registering the following instances to the ELB #{elb_name}: #{to_reg_str}")
+                elbconn.register_instances(to_register, elb_name)
+            end
+            if not to_deregister.empty?
 
-            # wait until all new instances are in service so we don't take down the site on accident
-            elb = elbconn.load_balancers.get(elb_name)
-            while not elb.instances_out_of_service.select {|i| not to_deregister.include? i }.empty?
-                Chef::Log.info("Waiting for all servers to go in service before deregistering old servers")
-                sleep 1
-                elb.reload
-            end if node.elby.wait_for_healthy
-            # TODO: instead of making sure all instances are healthy before progressing, make sure a majority are passing
+                # wait until all new instances are in service so we don't take down the site on accident
+                elb = elbconn.load_balancers.get(elb_name)
+                while not elb.instances_out_of_service.select {|i| not to_deregister.include? i }.empty?
+                    Chef::Log.info("Waiting for all servers to go in service before deregistering old servers")
+                    sleep 1
+                    elb.reload
+                end if node.elby.wait_for_healthy
+                # TODO: instead of making sure all instances are healthy before progressing, make sure a majority are passing
 
 
 
-            to_dereg_str = (to_deregister.map {|i| "#{identity_map[i]} (i)" }).join(', ')
-            Chef::Log.info("Deregistering the following instances from the ELB #{elb_name}: #{to_dereg_str}")
-            elbconn.deregister_instances(to_deregister, elb_name)
-            updated = true
+                to_dereg_str = (to_deregister.map {|i| "#{identity_map[i]} (i)" }).join(', ')
+                Chef::Log.info("Deregistering the following instances from the ELB #{elb_name}: #{to_dereg_str}")
+                elbconn.deregister_instances(to_deregister, elb_name)
+            end
         end
     end
-    return updated
+    threads.each { |t| t.join }
 end
 
 def do_elb_thing(node)
