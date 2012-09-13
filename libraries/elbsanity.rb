@@ -93,7 +93,7 @@ def update_elb_instances(node, elbconn)
     proper_mapping = {}
     identity_map = {}
     threads = []
-    node[:deployment][:elbs].each_pair do |trait,elb_name|
+    node[:elby][:elbs].each_pair do |trait,elb_name|
         nodes = fakesearch_nodes(trait.to_s)
         proper_mapping[elb_name] = nodes unless elb_name.nil?
         care_about.concat( nodes.map { |n| n[:persist][:ec2_instance_id] } )
